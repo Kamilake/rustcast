@@ -9,6 +9,8 @@ pub struct OpusEncoder {
     sample_rate: u32,
     channels: u16,
     frame_size: usize,
+    // Buffer for accumulating samples until we have a full frame
+    sample_buffer: Vec<i16>,
 }
 
 impl OpusEncoder {
@@ -52,8 +54,8 @@ impl OpusEncoder {
         
         // Frame size in samples at 48kHz
         // Opus supports: 2.5, 5, 10, 20, 40, 60, 80, 100, 120ms
-        // 10ms = 480 samples at 48kHz (good balance of latency and efficiency)
-        let frame_size = 480; // 10ms at 48kHz
+        // 20ms = 960 samples at 48kHz (Discord-style, good efficiency)
+        let frame_size = 960; // 20ms at 48kHz
         
         log::info!(
             "Opus encoder created: {}Hz -> 48kHz, {} channels, {}kbps, {}ms frame",
@@ -68,6 +70,7 @@ impl OpusEncoder {
             sample_rate,
             channels,
             frame_size,
+            sample_buffer: Vec::with_capacity(frame_size * channels as usize * 2),
         })
     }
     
@@ -176,6 +179,7 @@ impl OpusEncoder {
 
     /// Encode PCM samples to raw Opus packets (without Ogg container)
     /// Returns a list of encoded Opus packets
+    /// Buffers samples until a full frame (20ms) is available
     pub fn encode_raw(&mut self, samples: &[f32]) -> Result<Vec<Vec<u8>>, String> {
         if samples.is_empty() {
             return Ok(Vec::new());
@@ -209,25 +213,19 @@ impl OpusEncoder {
             samples.to_vec()
         };
         
-        // Convert f32 to i16 for Opus
-        let samples_i16: Vec<i16> = resampled
-            .iter()
-            .map(|&s: &f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-            .collect();
+        // Convert f32 to i16 and add to buffer
+        for &s in resampled.iter() {
+            self.sample_buffer.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
+        }
         
-        // Process in frame-sized chunks
+        // Process complete frames only
         let samples_per_frame = self.frame_size * self.channels as usize;
         let mut packets = Vec::new();
         
-        for chunk in samples_i16.chunks(samples_per_frame) {
-            if chunk.len() < samples_per_frame {
-                // Pad incomplete frame with silence
-                let mut padded = chunk.to_vec();
-                padded.resize(samples_per_frame, 0);
-                packets.push(self.encode_frame_raw(&padded)?);
-            } else {
-                packets.push(self.encode_frame_raw(chunk)?);
-            }
+        // Encode as many complete frames as we have
+        while self.sample_buffer.len() >= samples_per_frame {
+            let frame: Vec<i16> = self.sample_buffer.drain(..samples_per_frame).collect();
+            packets.push(self.encode_frame_raw(&frame)?);
         }
         
         Ok(packets)

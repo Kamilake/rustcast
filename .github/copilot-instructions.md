@@ -5,14 +5,14 @@ Windows 시스템 오디오를 Opus/Ogg로 실시간 스트리밍하는 서버. 
 
 ## 아키텍처
 ```
-AudioCapture (WASAPI) → OpusEncoder (audiopus) → StreamServer (HTTP/Ogg) → 클라이언트
-         └─────────────── crossbeam-channel ───────────────┘
+AudioCapture (WASAPI) → OpusEncoder (audiopus) ──┬── StreamServer (HTTP/Ogg) → 레거시 클라이언트
+         └─────────────── crossbeam-channel ──────┴── WebSocket (Raw Opus) → 저지연 클라이언트
 ```
 
 ### 핵심 데이터 흐름
 1. `audio.rs` - WASAPI 루프백으로 시스템 오디오 캡처 (48kHz, f32 스테레오)
 2. `opus_encoder.rs` - PCM → Opus 실시간 인코딩 (10ms 프레임, 128kbps 기본)
-3. `server.rs` - HTTP 스트리밍 (`/stream.opus`), 클라이언트별 Ogg 컨테이너 생성
+3. `server.rs` - HTTP/WebSocket 스트리밍, WebSocket은 Raw Opus 패킷, HTTP는 Ogg 컨테이너
 4. `tray.rs` - 시스템 트레이 UI + 콘솔 폴백
 5. `gui.rs` - Windows 네이티브 설정 패널 (native-windows-gui)
 6. `config.rs` - JSON 설정 (`%APPDATA%\rustcast\RustCast\config.json`)
@@ -46,9 +46,16 @@ let (opus_tx, opus_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel
 ### Opus 인코딩
 - 프레임 크기: 10ms (480 샘플 @ 48kHz) - 최저 지연
 - Application 모드: `LowDelay` - 실시간 스트리밍 최적화
-- Raw Opus 패킷 → 클라이언트별 Ogg 컨테이너 래핑
+- 샘플 버퍼링으로 완전한 프레임만 인코딩
+- Raw Opus 패킷 → WebSocket (저지연) 또는 Ogg 컨테이너 (레거시)
 
-### Ogg 컨테이너 (수동 생성)
+### WebSocket 스트리밍 (저지연)
+- `/ws` 엔드포인트로 WebSocket 연결
+- Raw Opus 패킷을 바이너리 프레임으로 전송 (Ogg 래핑 없음)
+- 클라이언트: opus-decoder WASM + Web Audio API
+- Hard sync: 버퍼 > 타겟 시 스킵 (playback rate 변경 없음)
+
+### Ogg 컨테이너 (레거시 클라이언트용)
 각 클라이언트가 유니크한 Ogg 스트림을 받도록 수동으로 Ogg 페이지 생성:
 ```rust
 // BOS 플래그는 첫 페이지에만, 이후 페이지는 continuation
@@ -73,14 +80,17 @@ struct Config {
 ## HTTP 엔드포인트
 | 경로 | 응답 |
 |------|------|
-| `/` | 웹 플레이어 HTML (Opus 재생) |
-| `/stream.opus` | Opus/Ogg 오디오 스트림 |
+| `/` | 저지연 웹 플레이어 (WebSocket + Web Audio API) |
+| `/legacy` | 레거시 HTML5 Audio 플레이어 |
+| `/ws` | WebSocket 스트리밍 (Raw Opus 패킷) |
+| `/stream.opus` | Opus/Ogg 오디오 스트림 (레거시) |
 | `/status` | `{"clients": N, "running": true}` |
 
 ## 의존성 역할
 - `cpal` - WASAPI 오디오 캡처
 - `audiopus` - Opus 인코딩 (libopus 바인딩)
 - `tiny_http` - 경량 HTTP 서버
+- `sha1` / `base64` - WebSocket 핸드셰이크
 - `native-windows-gui` - Windows 네이티브 GUI
 - `crossbeam-channel` - 고성능 스레드 채널
 - `directories` - 플랫폼별 설정 경로
@@ -92,7 +102,8 @@ struct Config {
 ## 알려진 제한사항
 - Windows 전용 (WASAPI 의존)
 - 기본 출력 장치만 캡처 (장치 선택 미지원)
-- Opus 인코딩 레이턴시 ~40ms (블루투스 수준)
+- WebSocket 저지연 플레이어: ~50-100ms (Web Audio API)
+- 레거시 HTTP 플레이어: ~2000-3000ms (브라우저 버퍼링)
 
 ## 테스트 방법
 현재 유닛 테스트 없음. 수동 테스트:

@@ -83,7 +83,7 @@ impl StreamServer {
         let opus_info = Arc::new(self.opus_info.clone().unwrap_or(OpusStreamInfo {
             channels: 2,
             sample_rate: 48000,
-            frame_size: 480,
+            frame_size: 960, // 20ms at 48kHz
         }));
 
         thread::spawn(move || {
@@ -343,7 +343,7 @@ impl StreamServer {
         }}
         .stats {{
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 10px;
             margin-top: 1rem;
         }}
@@ -470,6 +470,10 @@ impl StreamServer {
                 <div class="stat-value" id="packets">0</div>
                 <div class="stat-label">Packets/s</div>
             </div>
+            <div class="stat-box">
+                <div class="stat-value" id="speed">0</div>
+                <div class="stat-label">Syncs</div>
+            </div>
         </div>
         
         <div class="controls">
@@ -478,12 +482,12 @@ impl StreamServer {
         
         <div class="buffer-control">
             <label>🎯 Target Buffer: <span id="targetBufferValue">60</span>ms (lower = less latency, more glitches)</label>
-            <input type="range" id="targetBuffer" min="20" max="200" value="60" step="10">
+            <input type="range" id="targetBuffer" min="20" max="1000" value="60" step="10">
         </div>
         
         <div class="info">
             <p>WebSocket: ws://localhost:{}/ws | <a href="/legacy">Legacy Player</a></p>
-            <p>Opus 48kHz Stereo | 10ms frames</p>
+            <p>Opus 48kHz Stereo | 20ms frames</p>
         </div>
     </div>
 
@@ -496,6 +500,7 @@ impl StreamServer {
         const latencyEl = document.getElementById('latency');
         const bufferEl = document.getElementById('buffer');
         const packetsEl = document.getElementById('packets');
+        const speedEl = document.getElementById('speed');
         const playBtn = document.getElementById('playBtn');
         const targetBufferSlider = document.getElementById('targetBuffer');
         const targetBufferValue = document.getElementById('targetBufferValue');
@@ -516,6 +521,11 @@ impl StreamServer {
         let isProcessing = false;
         let startTime = 0;
         let totalSamplesPlayed = 0;
+        
+        // Adaptive sync state
+        let currentSource = null;
+        let syncCount = 0;
+        let lastSyncTime = 0;
         
         // Visualizer bars
         const NUM_BARS = 32;
@@ -590,7 +600,9 @@ impl StreamServer {
                     playBtn.textContent = '⏹ Stop';
                     playBtn.className = 'stop-btn';
                     startTime = audioContext.currentTime;
-                    nextPlayTime = audioContext.currentTime + (targetBufferMs / 1000);
+                    // Start with minimal buffer - first packet plays almost immediately
+                    nextPlayTime = audioContext.currentTime + 0.001;
+                    syncCount = 0;
                     totalSamplesPlayed = 0;
                     startStats();
                 }};
@@ -639,6 +651,8 @@ impl StreamServer {
             if (!audioContext || !isPlaying) return;
             
             const now = audioContext.currentTime;
+            const targetBufferSec = targetBufferMs / 1000;
+            const bufferDuration = samples / 48000;
             
             // Create buffer
             const buffer = audioContext.createBuffer(
@@ -655,32 +669,56 @@ impl StreamServer {
             // Update visualizer
             updateVisualizer(channelData[0]);
             
-            // Calculate play time
-            if (nextPlayTime < now) {{
-                // We're behind - catch up with minimal buffer
-                nextPlayTime = now + (targetBufferMs / 1000);
+            // Calculate when this packet should play
+            // The buffer ahead is how far nextPlayTime is from now
+            let bufferAhead = nextPlayTime - now;
+            
+            // === ADAPTIVE BUFFER MANAGEMENT ===
+            
+            // Case 1: We're behind (buffer underrun) - play immediately with tiny buffer
+            if (nextPlayTime <= now) {{
+                nextPlayTime = now + 0.001; // Play almost immediately
+                bufferAhead = 0.001;
             }}
             
-            // Create and schedule source
+            // Case 2: Buffer is too large - hard sync to target
+            // Use a smaller threshold for tighter latency control
+            if (bufferAhead > targetBufferSec) {{
+                const oldBuffer = bufferAhead * 1000;
+                nextPlayTime = now + targetBufferSec;
+                syncCount++;
+                console.log(`[Sync] ${{oldBuffer.toFixed(0)}}ms → ${{targetBufferMs}}ms`);
+            }}
+            
+            // Schedule playback
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
             source.connect(audioContext.destination);
             source.start(nextPlayTime);
             
-            // Track timing
-            const bufferDuration = samples / 48000;
-            totalSamplesPlayed += samples;
+            // Advance nextPlayTime for the next packet
             nextPlayTime += bufferDuration;
             
-            // Update buffer stat (how far ahead we're scheduled)
-            const bufferAhead = (nextPlayTime - now) * 1000;
-            bufferEl.textContent = Math.round(bufferAhead);
-            bufferEl.className = 'stat-value' + (bufferAhead < 30 ? ' bad' : bufferAhead < 50 ? ' warn' : '');
+            // Calculate actual buffer (before adding this frame's duration)
+            const actualBufferMs = (nextPlayTime - now - bufferDuration) * 1000;
             
-            // Estimate actual latency (network + buffer)
-            const estimatedLatency = bufferAhead + 10; // +10ms for Opus frame
+            // Update UI
+            speedEl.textContent = syncCount;
+            speedEl.className = 'stat-value' + (syncCount > 0 ? ' warn' : '');
+            
+            bufferEl.textContent = Math.round(Math.max(0, actualBufferMs));
+            if (actualBufferMs < 20) {{
+                bufferEl.className = 'stat-value bad';
+            }} else if (actualBufferMs < 40) {{
+                bufferEl.className = 'stat-value warn';
+            }} else {{
+                bufferEl.className = 'stat-value';
+            }}
+            
+            // Latency = buffer + frame duration + network (~10ms estimate)
+            const estimatedLatency = Math.max(0, actualBufferMs) + 20 + 10;
             latencyEl.textContent = Math.round(estimatedLatency);
-            latencyEl.className = 'stat-value' + (estimatedLatency > 100 ? ' warn' : estimatedLatency > 200 ? ' bad' : '');
+            latencyEl.className = 'stat-value' + (estimatedLatency > 100 ? ' warn' : '');
         }}
         
         function updateVisualizer(samples) {{
