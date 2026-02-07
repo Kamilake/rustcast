@@ -38,7 +38,7 @@ impl AudioCapture {
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
 
-        let (_tx, rx): (Sender<AudioSample>, Receiver<AudioSample>) = crossbeam_channel::bounded(32);
+        let (_tx, rx): (Sender<AudioSample>, Receiver<AudioSample>) = crossbeam_channel::bounded(4);
         let is_capturing = Arc::new(AtomicBool::new(false));
 
         let capture = Self {
@@ -99,7 +99,15 @@ impl AudioCapture {
             config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let samples: Vec<f32> = data.to_vec();
-                let _ = tx.try_send(samples);
+                match tx.try_send(samples) {
+                    Ok(_) => {},
+                    Err(crossbeam_channel::TrySendError::Full(_)) => {
+                        log::warn!("[AUDIO] 채널 버퍼 풀! 오디오 샘플 {} 개 드롭됨", data.len());
+                    },
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                        log::error!("[AUDIO] 채널 연결 끊김!");
+                    }
+                }
             },
             err_fn,
             None,
@@ -120,7 +128,15 @@ impl AudioCapture {
             config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                 let samples: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                let _ = tx.try_send(samples);
+                match tx.try_send(samples) {
+                    Ok(_) => {},
+                    Err(crossbeam_channel::TrySendError::Full(_)) => {
+                        log::warn!("[AUDIO] 채널 버퍼 풀! i16 오디오 샘플 {} 개 드롭됨", data.len());
+                    },
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                        log::error!("[AUDIO] 채널 연결 끊김!");
+                    }
+                }
             },
             err_fn,
             None,
@@ -141,7 +157,15 @@ impl AudioCapture {
             config,
             move |data: &[u16], _: &cpal::InputCallbackInfo| {
                 let samples: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
-                let _ = tx.try_send(samples);
+                match tx.try_send(samples) {
+                    Ok(_) => {},
+                    Err(crossbeam_channel::TrySendError::Full(_)) => {
+                        log::warn!("[AUDIO] 채널 버퍼 풀! u16 오디오 샘플 {} 개 드롭됨", data.len());
+                    },
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                        log::error!("[AUDIO] 채널 연결 끊김!");
+                    }
+                }
             },
             err_fn,
             None,

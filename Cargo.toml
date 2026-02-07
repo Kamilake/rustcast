@@ -13,8 +13,10 @@ cpal = "0.15"
 # HTTP Server for streaming
 tiny_http = "0.12"
 
-# Audio encoding (MP3)
-mp3lame-encoder = "0.2"
+# Audio encoding
+mp3lame-encoder = "0.2"     # MP3 (legacy, higher latency)
+audiopus = "0.3.0-rc.0"     # Opus encoding (low latency)
+ogg = "0.9"                 # Ogg container for Opus
 
 # Configuration
 serde = { version = "1.0", features = ["derive"] }

@@ -5,7 +5,7 @@
 //! Features:
 //! - Native settings panel with streaming controls
 //! - System tray icon with right-click menu
-//! - MP3 streaming via HTTP
+//! - Low-latency Opus streaming via HTTP
 //! - Configurable port and bitrate
 //! - Auto-start streaming on launch
 
@@ -16,11 +16,12 @@ mod config;
 mod encoder;
 #[cfg(windows)]
 mod gui;
+mod opus_encoder;
 mod server;
 
 use audio::AudioCapture;
 use config::Config;
-use encoder::Mp3Encoder;
+use opus_encoder::OpusEncoder;
 #[cfg(windows)]
 use gui::{AppState, GuiAction};
 use server::StreamServer;
@@ -88,10 +89,10 @@ fn show_error_message(message: &str) {
 /// Run application with native Windows GUI
 #[cfg(windows)]
 fn run_app_with_gui(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // Create channels for audio data
+    // Create channels for audio data (small buffers for low latency)
     let (audio_tx, audio_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) =
-        crossbeam_channel::bounded(64);
-    let (mp3_tx, mp3_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(64);
+        crossbeam_channel::bounded(4);
+    let (mp3_tx, mp3_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(4);
 
     // Initialize audio capture (get sample rate/channels info only)
     let (audio_capture_info, _) = AudioCapture::new()?;
@@ -101,8 +102,9 @@ fn run_app_with_gui(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Audio: {}Hz, {} channels", sample_rate, channels);
 
-    // Create MP3 encoder
-    let mut encoder = Mp3Encoder::new(sample_rate, channels, config.bitrate)?;
+    // Create Opus encoder (low-latency)
+    let mut encoder = OpusEncoder::new(sample_rate, channels, config.bitrate)?;
+    let opus_frame_size = encoder.frame_size();
 
     // Streaming state flags
     let is_streaming = Arc::new(AtomicBool::new(false));
@@ -110,19 +112,48 @@ fn run_app_with_gui(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let should_stream = Arc::new(AtomicBool::new(config.auto_start));
     let app_quit = Arc::new(AtomicBool::new(false));
 
-    // Start encoding thread
+    // Start encoding thread - outputs raw Opus packets (not Ogg wrapped)
     thread::spawn(move || {
+        let mut total_encoded = 0u64;
+        let mut total_dropped = 0u64;
+        let mut last_log = std::time::Instant::now();
+        
         while let Ok(samples) = audio_rx.recv() {
-            if let Ok(mp3_data) = encoder.encode(&samples) {
-                if !mp3_data.is_empty() {
-                    let _ = mp3_tx.try_send(mp3_data);
+            if let Ok(opus_packets) = encoder.encode_raw(&samples) {
+                for packet in opus_packets {
+                    if !packet.is_empty() {
+                        match mp3_tx.try_send(packet) {
+                            Ok(_) => {
+                                total_encoded += 1;
+                            },
+                            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                                total_dropped += 1;
+                                log::warn!("[ENCODER] Opus 채널 버퍼 풀! 패킷 드롭됨");
+                            },
+                            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                                log::error!("[ENCODER] 채널 연결 끊김!");
+                                return;
+                            }
+                        }
+                    }
                 }
+            }
+            
+            // 5초마다 통계 출력
+            if last_log.elapsed().as_secs() >= 5 {
+                log::info!("[ENCODER] 통계: 인코딩됨={}, 드롭됨={}, 드롭률={:.1}%", 
+                    total_encoded, total_dropped,
+                    if total_encoded + total_dropped > 0 {
+                        (total_dropped as f64 / (total_encoded + total_dropped) as f64) * 100.0
+                    } else { 0.0 });
+                last_log = std::time::Instant::now();
             }
         }
     });
 
-    // Create and start server with shared client_count
+    // Create and start server with shared client_count and stream info
     let mut server = StreamServer::with_client_count(config.port, client_count.clone());
+    server.set_opus_info(channels, sample_rate, opus_frame_size);
     server.start(mp3_rx)?;
 
     // Audio control thread - handles audio capture in its own thread

@@ -1,5 +1,5 @@
 //! HTTP streaming server
-//! Serves MP3 audio stream to connected clients
+//! Serves Opus/Ogg audio stream to connected clients
 
 use crossbeam_channel::Receiver;
 use std::io::Write;
@@ -8,11 +8,22 @@ use std::sync::Arc;
 use std::thread;
 use tiny_http::{Response, Server, StatusCode};
 
+use crate::opus_encoder::OpusEncoder;
+
+/// Opus stream info for each client to create proper Ogg stream
+#[derive(Clone)]
+struct OpusStreamInfo {
+    channels: u16,
+    sample_rate: u32,
+    frame_size: usize,
+}
+
 /// HTTP streaming server
 pub struct StreamServer {
     port: u16,
     is_running: Arc<AtomicBool>,
     client_count: Arc<AtomicUsize>,
+    opus_info: Option<OpusStreamInfo>,
 }
 
 impl StreamServer {
@@ -22,6 +33,7 @@ impl StreamServer {
             port,
             is_running: Arc::new(AtomicBool::new(false)),
             client_count: Arc::new(AtomicUsize::new(0)),
+            opus_info: None,
         }
     }
 
@@ -31,7 +43,13 @@ impl StreamServer {
             port,
             is_running: Arc::new(AtomicBool::new(false)),
             client_count,
+            opus_info: None,
         }
+    }
+    
+    /// Set Opus stream info (must be called before start)
+    pub fn set_opus_info(&mut self, channels: u16, sample_rate: u32, frame_size: usize) {
+        self.opus_info = Some(OpusStreamInfo { channels, sample_rate, frame_size });
     }
 
     /// Get current client count
@@ -62,6 +80,11 @@ impl StreamServer {
         let is_running = self.is_running.clone();
         let client_count = self.client_count.clone();
         let port = self.port;
+        let opus_info = Arc::new(self.opus_info.clone().unwrap_or(OpusStreamInfo {
+            channels: 2,
+            sample_rate: 48000,
+            frame_size: 480,
+        }));
 
         thread::spawn(move || {
             // Use a broadcast mechanism for multiple clients
@@ -73,10 +96,26 @@ impl StreamServer {
 
             // Audio broadcast thread
             thread::spawn(move || {
+                let mut total_received = 0u64;
+                let mut total_broadcast = 0u64;
+                let mut last_log = std::time::Instant::now();
+                
                 while is_running_clone.load(Ordering::SeqCst) {
                     if let Ok(data) = audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        total_received += 1;
                         let mut clients_guard = clients_clone.lock().unwrap();
+                        let client_count = clients_guard.len();
                         clients_guard.retain(|client| client.send(data.clone()).is_ok());
+                        if client_count > 0 {
+                            total_broadcast += 1;
+                        }
+                        
+                        // 5초마다 통계 출력
+                        if last_log.elapsed().as_secs() >= 5 {
+                            log::info!("[SERVER] 통계: 수신됨={}, 브로드캐스트={}, 연결된 클라이언트={}", 
+                                total_received, total_broadcast, client_count);
+                            last_log = std::time::Instant::now();
+                        }
                     }
                 }
             });
@@ -88,8 +127,10 @@ impl StreamServer {
                 }
 
                 let url = request.url().to_string();
+                // Strip query string for matching (e.g., "/stream.opus?123456" -> "/stream.opus")
+                let path = url.split('?').next().unwrap_or(&url);
                 
-                match url.as_str() {
+                match path {
                     "/" => {
                         // Serve main page
                         let html = Self::get_index_html(port);
@@ -99,7 +140,7 @@ impl StreamServer {
                             );
                         let _ = request.respond(response);
                     }
-                    "/stream" | "/stream.mp3" => {
+                    "/stream" | "/stream.opus" | "/stream.ogg" => {
                         // Create channel for this client
                         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                         
@@ -109,48 +150,66 @@ impl StreamServer {
                         }
                         
                         client_count.fetch_add(1, Ordering::SeqCst);
-                        log::info!("Client connected. Total: {}", client_count.load(Ordering::SeqCst));
+                        log::info!("Client connected (Opus). Total: {}", client_count.load(Ordering::SeqCst));
 
                         let client_count_clone = client_count.clone();
+                        let info = opus_info.clone();
                         
                         // Stream in a separate thread
                         thread::spawn(move || {
                             // Get raw TCP stream from the request
                             let mut stream = request.into_writer();
                             
-                            // Manually write HTTP response headers
-                            let headers = b"HTTP/1.1 200 OK\r\n\
-                                Content-Type: audio/mpeg\r\n\
+                            // Manually write HTTP response headers for Ogg/Opus
+                            let http_headers = b"HTTP/1.1 200 OK\r\n\
+                                Content-Type: audio/ogg\r\n\
                                 Cache-Control: no-cache, no-store\r\n\
                                 Connection: keep-alive\r\n\
                                 Access-Control-Allow-Origin: *\r\n\
-                                Transfer-Encoding: chunked\r\n\
                                 \r\n";
                             
-                            if stream.write_all(headers).is_err() {
+                            if stream.write_all(http_headers).is_err() {
                                 client_count_clone.fetch_sub(1, Ordering::SeqCst);
                                 log::info!("Client disconnected (header write failed). Total: {}", client_count_clone.load(Ordering::SeqCst));
                                 return;
                             }
+                            
+                            // Generate unique serial for this client's Ogg stream
+                            let serial = generate_serial();
+                            
+                            // Send Ogg/Opus headers (unique per client)
+                            let headers = OpusEncoder::get_headers_with_serial(info.channels, info.sample_rate, serial);
+                            if stream.write_all(&headers).is_err() {
+                                client_count_clone.fetch_sub(1, Ordering::SeqCst);
+                                log::info!("Client disconnected (Opus header write failed). Total: {}", client_count_clone.load(Ordering::SeqCst));
+                                return;
+                            }
+                            
                             if stream.flush().is_err() {
                                 client_count_clone.fetch_sub(1, Ordering::SeqCst);
                                 log::info!("Client disconnected (header flush failed). Total: {}", client_count_clone.load(Ordering::SeqCst));
                                 return;
                             }
                             
-                            // Stream audio data
-                            while let Ok(data) = rx.recv() {
-                                // Write chunk size in hex followed by CRLF
-                                let chunk_header = format!("{:X}\r\n", data.len());
-                                if stream.write_all(chunk_header.as_bytes()).is_err() {
-                                    break;
-                                }
-                                // Write chunk data
-                                if stream.write_all(&data).is_err() {
-                                    break;
-                                }
-                                // Write trailing CRLF
-                                if stream.write_all(b"\r\n").is_err() {
+                            // Track granule position and page sequence for this client
+                            let mut granule_position: u64 = 0;
+                            let mut page_sequence: u32 = 2; // 0 and 1 used by headers
+                            let frame_size = info.frame_size as u64;
+                            
+                            // Stream audio data - wrap each raw Opus packet in Ogg
+                            while let Ok(opus_packet) = rx.recv() {
+                                granule_position += frame_size;
+                                
+                                // Use our manual Ogg page creation (proper flags)
+                                let ogg_page = OpusEncoder::wrap_opus_packet(
+                                    &opus_packet, 
+                                    serial, 
+                                    granule_position, 
+                                    page_sequence
+                                );
+                                page_sequence += 1;
+                                
+                                if stream.write_all(&ogg_page).is_err() {
                                     break;
                                 }
                                 if stream.flush().is_err() {
@@ -195,7 +254,7 @@ impl StreamServer {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎵 RustCast - Audio Stream</title>
+    <title>🎵 RustCast - Low Latency Audio</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -214,16 +273,30 @@ impl StreamServer {
             border-radius: 20px;
             backdrop-filter: blur(10px);
             box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            min-width: 350px;
         }}
         h1 {{
             font-size: 2.5rem;
-            margin-bottom: 1rem;
-            background: linear-gradient(45deg, #f39c12, #e74c3c);
+            margin-bottom: 0.5rem;
+            background: linear-gradient(45deg, #9b59b6, #3498db);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }}
+        .subtitle {{
+            color: #888;
+            margin-bottom: 1rem;
+        }}
+        .codec-badge {{
+            display: inline-block;
+            padding: 4px 12px;
+            background: linear-gradient(45deg, #9b59b6, #8e44ad);
+            border-radius: 20px;
+            font-size: 0.75rem;
+            margin-bottom: 1rem;
         }}
         .player {{
-            margin: 2rem 0;
+            margin: 1.5rem 0;
         }}
         audio {{
             width: 300px;
@@ -235,6 +308,42 @@ impl StreamServer {
             background: rgba(46, 204, 113, 0.2);
             border-radius: 10px;
             font-size: 0.9rem;
+        }}
+        .status.buffering {{
+            background: rgba(241, 196, 15, 0.2);
+        }}
+        .latency-info {{
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: #27ae60;
+            font-weight: bold;
+        }}
+        .controls {{
+            margin-top: 1rem;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }}
+        button {{
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: transform 0.1s;
+        }}
+        button:hover {{
+            transform: scale(1.05);
+        }}
+        button:active {{
+            transform: scale(0.95);
+        }}
+        .play-btn {{
+            background: linear-gradient(45deg, #27ae60, #2ecc71);
+            color: white;
+            font-size: 1.1rem;
+            padding: 12px 24px;
         }}
         .info {{
             margin-top: 1.5rem;
@@ -250,37 +359,135 @@ impl StreamServer {
 <body>
     <div class="container">
         <h1>🎵 RustCast</h1>
-        <p>Windows System Audio Streaming</p>
+        <p class="subtitle">Windows System Audio Streaming</p>
+        <span class="codec-badge">🚀 Opus Low-Latency</span>
         
         <div class="player">
-            <audio controls autoplay>
-                <source src="/stream.mp3" type="audio/mpeg">
-                Your browser does not support audio.
+            <audio id="audio" controls playsinline webkit-playsinline>
+                <source src="/stream.opus" type="audio/ogg">
+                <source src="/stream.ogg" type="audio/ogg">
+                Your browser does not support Opus audio.
             </audio>
         </div>
         
-        <div class="status" id="status">
-            🟢 Streaming Live
+        <div class="controls">
+            <button class="play-btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
         </div>
         
+        <div class="status" id="status">
+            ⏸ Ready to stream
+        </div>
+        <div class="latency-info" id="latencyInfo">Expected latency: ~50-100ms</div>
+        
         <div class="info">
-            <p>Direct stream: <a href="/stream.mp3">/stream.mp3</a></p>
-            <p>Port: {}</p>
+            <p>Direct stream: <a href="/stream.opus">/stream.opus</a></p>
+            <p>Port: {} | Codec: Opus</p>
         </div>
     </div>
     
     <script>
-        // Auto-reconnect on error
-        const audio = document.querySelector('audio');
-        audio.addEventListener('error', () => {{
-            setTimeout(() => {{
-                audio.src = '/stream.mp3?' + Date.now();
+        const audio = document.getElementById('audio');
+        const status = document.getElementById('status');
+        const latencyInfo = document.getElementById('latencyInfo');
+        const playBtn = document.getElementById('playBtn');
+        
+        let isPlaying = false;
+        let bufferCheckInterval = null;
+        
+        function togglePlay() {{
+            if (isPlaying) {{
+                audio.pause();
+                audio.src = '';
+                isPlaying = false;
+                playBtn.textContent = '▶ Play';
+                status.textContent = '⏸ Paused';
+                status.className = 'status';
+                latencyInfo.textContent = 'Expected latency: ~50-100ms';
+                if (bufferCheckInterval) {{
+                    clearInterval(bufferCheckInterval);
+                    bufferCheckInterval = null;
+                }}
+            }} else {{
+                // Reload stream for fresh start with Opus
+                audio.src = '/stream.opus?' + Date.now();
                 audio.load();
-                audio.play();
-            }}, 1000);
+                audio.play().then(() => {{
+                    isPlaying = true;
+                    playBtn.textContent = '⏹ Stop';
+                    status.textContent = '🟢 Streaming Live (Opus)';
+                    status.className = 'status';
+                    startBufferMonitor();
+                }}).catch(e => {{
+                    console.error('Play failed:', e);
+                    status.textContent = '❌ Error: ' + e.message;
+                }});
+            }}
+        }}
+        
+        function startBufferMonitor() {{
+            // Monitor buffer and skip ahead if too large
+            bufferCheckInterval = setInterval(() => {{
+                if (!isPlaying) return;
+                
+                const buffered = audio.buffered;
+                if (buffered.length > 0) {{
+                    const bufferedEnd = buffered.end(buffered.length - 1);
+                    const currentTime = audio.currentTime;
+                    const bufferSize = bufferedEnd - currentTime;
+                    
+                    // Opus has low latency, skip if buffer > 150ms
+                    if (bufferSize > 0.15) {{
+                        audio.currentTime = bufferedEnd - 0.05;
+                        latencyInfo.textContent = `⚡ Buffer: ${{(bufferSize * 1000).toFixed(0)}}ms → Synced!`;
+                    }} else {{
+                        latencyInfo.textContent = `⚡ Buffer: ${{(bufferSize * 1000).toFixed(0)}}ms`;
+                    }}
+                }}
+            }}, 100);
+        }}
+        
+        // Auto-reconnect on error
+        audio.addEventListener('error', (e) => {{
+            console.error('Audio error:', e);
+            if (isPlaying) {{
+                status.textContent = '🔄 Reconnecting...';
+                status.className = 'status buffering';
+                setTimeout(() => {{
+                    audio.src = '/stream.opus?' + Date.now();
+                    audio.load();
+                    audio.play().catch(console.error);
+                }}, 1000);
+            }}
+        }});
+        
+        audio.addEventListener('waiting', () => {{
+            status.textContent = '⏳ Buffering...';
+            status.className = 'status buffering';
+        }});
+        
+        audio.addEventListener('playing', () => {{
+            status.textContent = '🟢 Streaming Live (Opus)';
+            status.className = 'status';
         }});
     </script>
 </body>
 </html>"#, port)
     }
+}
+
+/// Generate a random serial number for Ogg stream
+fn generate_serial() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    
+    let time_part = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u32)
+        .unwrap_or(0);
+    
+    let counter_part = COUNTER.fetch_add(1, Ordering::SeqCst);
+    
+    time_part.wrapping_add(counter_part)
 }

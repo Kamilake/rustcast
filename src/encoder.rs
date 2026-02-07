@@ -27,7 +27,9 @@ impl Mp3Encoder {
             320 => mp3lame_encoder::Bitrate::Kbps320,
             _ => mp3lame_encoder::Bitrate::Kbps192,
         }).map_err(|e| format!("set_brate: {:?}", e))?;
-        builder.set_quality(mp3lame_encoder::Quality::Best).map_err(|e| format!("set_quality: {:?}", e))?;
+        // Use SecondWorst quality (8) for low latency while maintaining acceptable audio quality
+        // Worst (9) has too many artifacts, Best (0) has too much latency
+        builder.set_quality(mp3lame_encoder::Quality::SecondWorst).map_err(|e| format!("set_quality: {:?}", e))?;
 
         let encoder = builder.build().map_err(|e| format!("build: {:?}", e))?;
         
