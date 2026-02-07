@@ -1,0 +1,46 @@
+[package]
+name = "rustcast"
+version = "0.1.0"
+edition = "2021"
+description = "Windows System Audio Streaming Server - Double-click and stream!"
+authors = ["Kamilake"]
+license = "MIT"
+
+[dependencies]
+# Windows Audio Capture (WASAPI)
+cpal = "0.15"
+
+# HTTP Server for streaming
+tiny_http = "0.12"
+
+# System Tray
+tray-item = "0.10"
+
+# Audio encoding (MP3)
+mp3lame-encoder = "0.2"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "5.0"
+
+# Async runtime
+crossbeam-channel = "0.5"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# For Windows-specific features
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "shellapi"] }
+windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+# Windows build dependencies for embedding icon
+[build-dependencies]
+winres = "0.1"
