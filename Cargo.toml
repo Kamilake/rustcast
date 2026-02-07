@@ -13,9 +13,6 @@ cpal = "0.15"
 # HTTP Server for streaming
 tiny_http = "0.12"
 
-# System Tray
-tray-item = "0.10"
-
 # Audio encoding (MP3)
 mp3lame-encoder = "0.2"
 
@@ -35,6 +32,8 @@ env_logger = "0.11"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "shellapi"] }
 windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
+native-windows-gui = "1.0"
+native-windows-derive = "1.0"
 
 [profile.release]
 opt-level = 3

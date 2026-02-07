@@ -1,8 +1,9 @@
 //! RustCast - Windows System Audio Streaming Server
-//! 
+//!
 //! Double-click to start streaming your PC's audio to any device!
-//! 
+//!
 //! Features:
+//! - Native settings panel with streaming controls
 //! - System tray icon with right-click menu
 //! - MP3 streaming via HTTP
 //! - Configurable port and bitrate
@@ -13,20 +14,23 @@
 mod audio;
 mod config;
 mod encoder;
+#[cfg(windows)]
+mod gui;
 mod server;
-mod tray;
 
 use audio::AudioCapture;
 use config::Config;
 use encoder::Mp3Encoder;
+#[cfg(windows)]
+use gui::{AppState, GuiAction};
 use server::StreamServer;
-use tray::{SystemTray, TrayAction};
 
 use crossbeam_channel::{self, Receiver, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 fn main() {
     // Initialize logger
@@ -38,61 +42,75 @@ fn main() {
 
     // Load configuration
     let config = Config::load();
-    log::info!("Configuration: port={}, bitrate={}kbps", config.port, config.bitrate);
+    log::info!(
+        "Configuration: port={}, bitrate={}kbps",
+        config.port,
+        config.bitrate
+    );
 
     // Run the application
-    if let Err(e) = run_app(config) {
-        log::error!("Application error: {}", e);
-        
-        // Show error message box on Windows
-        #[cfg(windows)]
-        {
-            use std::ffi::OsStr;
-            use std::os::windows::ffi::OsStrExt;
-            use std::iter::once;
-
-            let message: Vec<u16> = OsStr::new(&format!("RustCast Error:\n{}", e))
-                .encode_wide()
-                .chain(once(0))
-                .collect();
-            let title: Vec<u16> = OsStr::new("RustCast")
-                .encode_wide()
-                .chain(once(0))
-                .collect();
-            
-            unsafe {
-                winapi::um::winuser::MessageBoxW(
-                    std::ptr::null_mut(),
-                    message.as_ptr(),
-                    title.as_ptr(),
-                    winapi::um::winuser::MB_OK | winapi::um::winuser::MB_ICONERROR,
-                );
-            }
+    #[cfg(windows)]
+    {
+        if let Err(e) = run_app_with_gui(config) {
+            log::error!("Application error: {}", e);
+            show_error_message(&format!("RustCast Error:\n{}", e));
+            std::process::exit(1);
         }
-        
+    }
+
+    #[cfg(not(windows))]
+    {
+        log::error!("RustCast only supports Windows");
         std::process::exit(1);
     }
 }
 
-fn run_app(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+/// Show error message box on Windows
+#[cfg(windows)]
+fn show_error_message(message: &str) {
+    use std::ffi::OsStr;
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+
+    let message: Vec<u16> = OsStr::new(message).encode_wide().chain(once(0)).collect();
+    let title: Vec<u16> = OsStr::new("RustCast").encode_wide().chain(once(0)).collect();
+
+    unsafe {
+        winapi::um::winuser::MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            winapi::um::winuser::MB_OK | winapi::um::winuser::MB_ICONERROR,
+        );
+    }
+}
+
+/// Run application with native Windows GUI
+#[cfg(windows)]
+fn run_app_with_gui(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Create channels for audio data
-    let (audio_tx, audio_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = crossbeam_channel::bounded(64);
+    let (audio_tx, audio_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) =
+        crossbeam_channel::bounded(64);
     let (mp3_tx, mp3_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::bounded(64);
 
-    // Initialize audio capture
-    let (mut audio_capture, _) = AudioCapture::new()?;
-    let sample_rate = audio_capture.sample_rate;
-    let channels = audio_capture.channels;
+    // Initialize audio capture (get sample rate/channels info only)
+    let (audio_capture_info, _) = AudioCapture::new()?;
+    let sample_rate = audio_capture_info.sample_rate;
+    let channels = audio_capture_info.channels;
+    drop(audio_capture_info); // Drop to release resources, we'll create new one in audio thread
 
     log::info!("Audio: {}Hz, {} channels", sample_rate, channels);
 
     // Create MP3 encoder
     let mut encoder = Mp3Encoder::new(sample_rate, channels, config.bitrate)?;
 
-    // Start encoding thread
+    // Streaming state flags
     let is_streaming = Arc::new(AtomicBool::new(false));
-    let is_streaming_clone = is_streaming.clone();
-    
+    let client_count = Arc::new(AtomicUsize::new(0));
+    let should_stream = Arc::new(AtomicBool::new(config.auto_start));
+    let app_quit = Arc::new(AtomicBool::new(false));
+
+    // Start encoding thread
     thread::spawn(move || {
         while let Ok(samples) = audio_rx.recv() {
             if let Ok(mp3_data) = encoder.encode(&samples) {
@@ -107,58 +125,106 @@ fn run_app(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut server = StreamServer::new(config.port);
     server.start(mp3_rx)?;
 
-    // Start audio capture if auto_start is enabled
-    if config.auto_start {
-        audio_capture.start(audio_tx.clone())?;
-        is_streaming.store(true, Ordering::SeqCst);
-    }
+    // Audio control thread - handles audio capture in its own thread
+    let audio_tx_clone = audio_tx.clone();
+    let is_streaming_clone = is_streaming.clone();
+    let should_stream_clone = should_stream.clone();
+    let app_quit_clone = app_quit.clone();
 
-    // Create system tray
-    let tray = SystemTray::new(config.port)?;
-    let tray_rx = tray.get_receiver();
+    thread::spawn(move || {
+        let mut audio_capture: Option<AudioCapture> = None;
 
-    // Open browser automatically
-    let url = format!("http://localhost:{}", config.port);
-    if let Err(e) = open_browser(&url) {
-        log::warn!("Could not open browser: {}", e);
-    }
+        loop {
+            if app_quit_clone.load(Ordering::SeqCst) {
+                break;
+            }
 
-    log::info!("✅ RustCast ready! Open http://localhost:{}", config.port);
+            let want_stream = should_stream_clone.load(Ordering::SeqCst);
+            let currently_streaming = audio_capture.is_some();
 
-    // Main event loop
-    loop {
-        // Check for tray actions
-        if let Ok(action) = tray_rx.recv_timeout(Duration::from_millis(100)) {
-            match action {
-                TrayAction::OpenBrowser => {
-                    let _ = open_browser(&url);
-                }
-                TrayAction::ToggleStream => {
-                    if is_streaming.load(Ordering::SeqCst) {
-                        audio_capture.stop();
-                        is_streaming.store(false, Ordering::SeqCst);
-                        log::info!("Streaming paused");
-                    } else {
-                        if let Err(e) = audio_capture.start(audio_tx.clone()) {
-                            log::error!("Failed to start capture: {}", e);
+            if want_stream && !currently_streaming {
+                // Start streaming
+                match AudioCapture::new() {
+                    Ok((mut capture, _)) => {
+                        if let Err(e) = capture.start(audio_tx_clone.clone()) {
+                            log::error!("Failed to start audio capture: {}", e);
                         } else {
-                            is_streaming.store(true, Ordering::SeqCst);
-                            log::info!("Streaming resumed");
+                            audio_capture = Some(capture);
+                            is_streaming_clone.store(true, Ordering::SeqCst);
+                            log::info!("Audio streaming started");
                         }
                     }
+                    Err(e) => {
+                        log::error!("Failed to create audio capture: {}", e);
+                    }
                 }
-                TrayAction::Settings => {
-                    show_settings_dialog(&config)?;
+            } else if !want_stream && currently_streaming {
+                // Stop streaming
+                if let Some(mut capture) = audio_capture.take() {
+                    capture.stop();
                 }
-                TrayAction::Quit => {
+                is_streaming_clone.store(false, Ordering::SeqCst);
+                log::info!("Audio streaming stopped");
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Cleanup
+        if let Some(mut capture) = audio_capture {
+            capture.stop();
+        }
+    });
+
+    // Create shared state for GUI
+    let app_state = Arc::new(AppState {
+        is_streaming: is_streaming.clone(),
+        client_count: client_count.clone(),
+        config: RefCell::new(config.clone()),
+    });
+
+    // Create channel for GUI actions
+    let (action_tx, action_rx) = mpsc::channel::<GuiAction>();
+
+    // Spawn thread to handle GUI actions
+    let should_stream_for_actions = should_stream.clone();
+    let app_quit_for_actions = app_quit.clone();
+    let port = config.port;
+
+    thread::spawn(move || {
+        while let Ok(action) = action_rx.recv() {
+            match action {
+                GuiAction::ToggleStream => {
+                    let current = should_stream_for_actions.load(Ordering::SeqCst);
+                    should_stream_for_actions.store(!current, Ordering::SeqCst);
+                    log::info!("Toggle streaming: {} -> {}", current, !current);
+                }
+                GuiAction::SaveConfig(new_config) => {
+                    if let Err(e) = new_config.save() {
+                        log::error!("Failed to save config: {}", e);
+                    } else {
+                        log::info!("Config saved");
+                    }
+                }
+                GuiAction::OpenBrowser => {
+                    let url = format!("http://localhost:{}", port);
+                    if let Err(e) = open_browser(&url) {
+                        log::warn!("Could not open browser: {}", e);
+                    }
+                }
+                GuiAction::Quit => {
                     log::info!("Quitting...");
-                    audio_capture.stop();
-                    server.stop();
-                    break;
+                    app_quit_for_actions.store(true, Ordering::SeqCst);
+                    std::process::exit(0);
                 }
             }
         }
-    }
+    });
+
+    log::info!("✅ RustCast ready! Open http://localhost:{}", config.port);
+
+    // Run the GUI (this blocks until quit)
+    gui::run_gui(action_tx, app_state)?;
 
     Ok(())
 }
@@ -174,46 +240,6 @@ fn open_browser(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(windows))]
     {
         std::process::Command::new("xdg-open").arg(url).spawn()?;
-    }
-    Ok(())
-}
-
-/// Show settings dialog
-fn show_settings_dialog(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(windows)]
-    {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use std::iter::once;
-
-        let message = format!(
-            "Current Settings:\n\n\
-            Port: {}\n\
-            Bitrate: {} kbps\n\
-            Auto-start: {}\n\n\
-            To change settings, edit the config file at:\n\
-            %APPDATA%\\rustcast\\RustCast\\config.json\n\n\
-            Then restart RustCast.",
-            config.port, config.bitrate, config.auto_start
-        );
-        
-        let message: Vec<u16> = OsStr::new(&message)
-            .encode_wide()
-            .chain(once(0))
-            .collect();
-        let title: Vec<u16> = OsStr::new("RustCast Settings")
-            .encode_wide()
-            .chain(once(0))
-            .collect();
-        
-        unsafe {
-            winapi::um::winuser::MessageBoxW(
-                std::ptr::null_mut(),
-                message.as_ptr(),
-                title.as_ptr(),
-                winapi::um::winuser::MB_OK | winapi::um::winuser::MB_ICONINFORMATION,
-            );
-        }
     }
     Ok(())
 }

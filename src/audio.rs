@@ -38,7 +38,7 @@ impl AudioCapture {
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
 
-        let (tx, rx): (Sender<AudioSample>, Receiver<AudioSample>) = crossbeam_channel::bounded(32);
+        let (_tx, rx): (Sender<AudioSample>, Receiver<AudioSample>) = crossbeam_channel::bounded(32);
         let is_capturing = Arc::new(AtomicBool::new(false));
 
         let capture = Self {
@@ -66,7 +66,7 @@ impl AudioCapture {
         let config = device.default_output_config()?;
         let stream_config: StreamConfig = config.clone().into();
 
-        let is_capturing = self.is_capturing.clone();
+        let _is_capturing = self.is_capturing.clone();
         
         // Build input stream for loopback capture
         let stream = match config.sample_format() {
