@@ -121,8 +121,8 @@ fn run_app_with_gui(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Create and start server
-    let mut server = StreamServer::new(config.port);
+    // Create and start server with shared client_count
+    let mut server = StreamServer::with_client_count(config.port, client_count.clone());
     server.start(mp3_rx)?;
 
     // Audio control thread - handles audio capture in its own thread

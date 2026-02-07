@@ -25,6 +25,15 @@ impl StreamServer {
         }
     }
 
+    /// Create a new stream server with shared client count
+    pub fn with_client_count(port: u16, client_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            port,
+            is_running: Arc::new(AtomicBool::new(false)),
+            client_count,
+        }
+    }
+
     /// Get current client count
     pub fn client_count(&self) -> usize {
         self.client_count.load(Ordering::SeqCst)
@@ -102,28 +111,46 @@ impl StreamServer {
                         client_count.fetch_add(1, Ordering::SeqCst);
                         log::info!("Client connected. Total: {}", client_count.load(Ordering::SeqCst));
 
-                        // Send streaming response
-                        let response = Response::empty(StatusCode(200))
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"audio/mpeg"[..]).unwrap()
-                            )
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap()
-                            )
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Connection"[..], &b"keep-alive"[..]).unwrap()
-                            )
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap()
-                            );
-
                         let client_count_clone = client_count.clone();
                         
                         // Stream in a separate thread
                         thread::spawn(move || {
+                            // Get raw TCP stream from the request
                             let mut stream = request.into_writer();
+                            
+                            // Manually write HTTP response headers
+                            let headers = b"HTTP/1.1 200 OK\r\n\
+                                Content-Type: audio/mpeg\r\n\
+                                Cache-Control: no-cache, no-store\r\n\
+                                Connection: keep-alive\r\n\
+                                Access-Control-Allow-Origin: *\r\n\
+                                Transfer-Encoding: chunked\r\n\
+                                \r\n";
+                            
+                            if stream.write_all(headers).is_err() {
+                                client_count_clone.fetch_sub(1, Ordering::SeqCst);
+                                log::info!("Client disconnected (header write failed). Total: {}", client_count_clone.load(Ordering::SeqCst));
+                                return;
+                            }
+                            if stream.flush().is_err() {
+                                client_count_clone.fetch_sub(1, Ordering::SeqCst);
+                                log::info!("Client disconnected (header flush failed). Total: {}", client_count_clone.load(Ordering::SeqCst));
+                                return;
+                            }
+                            
+                            // Stream audio data
                             while let Ok(data) = rx.recv() {
+                                // Write chunk size in hex followed by CRLF
+                                let chunk_header = format!("{:X}\r\n", data.len());
+                                if stream.write_all(chunk_header.as_bytes()).is_err() {
+                                    break;
+                                }
+                                // Write chunk data
                                 if stream.write_all(&data).is_err() {
+                                    break;
+                                }
+                                // Write trailing CRLF
+                                if stream.write_all(b"\r\n").is_err() {
                                     break;
                                 }
                                 if stream.flush().is_err() {
