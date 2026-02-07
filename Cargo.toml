@@ -13,6 +13,11 @@ cpal = "0.15"
 # HTTP Server for streaming
 tiny_http = "0.12"
 
+# WebSocket for ultra-low latency streaming
+tungstenite = "0.21"
+sha1 = "0.10"
+base64 = "0.22"
+
 # Audio encoding
 mp3lame-encoder = "0.2"     # MP3 (legacy, higher latency)
 audiopus = "0.3.0-rc.0"     # Opus encoding (low latency)
