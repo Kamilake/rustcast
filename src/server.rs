@@ -413,8 +413,54 @@ impl StreamServer {
             color: #888;
             margin-bottom: 0.5rem;
         }}
-        .buffer-control input {{
-            width: 100%;
+        .buffer-input-group {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }}
+        .buffer-btn {{
+            padding: 8px 16px;
+            min-width: 50px;
+            background: linear-gradient(45deg, #3498db, #2980b9);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+        .buffer-btn:hover {{
+            transform: scale(1.05);
+        }}
+        .buffer-btn:active {{
+            transform: scale(0.95);
+        }}
+        .buffer-input {{
+            width: 70px;
+            padding: 8px 12px;
+            border: 2px solid #3498db;
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            text-align: center;
+            -moz-appearance: textfield;
+        }}
+        .buffer-input::-webkit-outer-spin-button,
+        .buffer-input::-webkit-inner-spin-button {{
+            -webkit-appearance: none;
+            margin: 0;
+        }}
+        .buffer-input:focus {{
+            outline: none;
+            border-color: #2ecc71;
+        }}
+        .buffer-unit {{
+            color: #888;
+            font-size: 0.9rem;
         }}
         .info {{
             margin-top: 1.5rem;
@@ -481,8 +527,13 @@ impl StreamServer {
         </div>
         
         <div class="buffer-control">
-            <label>🎯 Target Buffer: <span id="targetBufferValue">60</span>ms (lower = less latency, more glitches)</label>
-            <input type="range" id="targetBuffer" min="20" max="1000" value="60" step="10">
+            <label>🎯 Target Buffer (lower = less latency, more glitches)</label>
+            <div class="buffer-input-group">
+                <button class="buffer-btn" id="bufferMinus">−10</button>
+                <input type="number" class="buffer-input" id="targetBuffer" min="20" max="1000" value="60" step="10">
+                <span class="buffer-unit">ms</span>
+                <button class="buffer-btn" id="bufferPlus">+10</button>
+            </div>
         </div>
         
         <div class="info">
@@ -502,8 +553,9 @@ impl StreamServer {
         const packetsEl = document.getElementById('packets');
         const speedEl = document.getElementById('speed');
         const playBtn = document.getElementById('playBtn');
-        const targetBufferSlider = document.getElementById('targetBuffer');
-        const targetBufferValue = document.getElementById('targetBufferValue');
+        const targetBufferInput = document.getElementById('targetBuffer');
+        const bufferMinusBtn = document.getElementById('bufferMinus');
+        const bufferPlusBtn = document.getElementById('bufferPlus');
         const visualizer = document.getElementById('visualizer');
         
         // Audio state
@@ -541,14 +593,25 @@ impl StreamServer {
         const savedBuffer = localStorage.getItem('rustcast_target_buffer');
         if (savedBuffer) {{
             targetBufferMs = parseInt(savedBuffer);
-            targetBufferSlider.value = targetBufferMs;
-            targetBufferValue.textContent = targetBufferMs;
+            targetBufferInput.value = targetBufferMs;
         }}
         
-        targetBufferSlider.addEventListener('input', (e) => {{
-            targetBufferMs = parseInt(e.target.value);
-            targetBufferValue.textContent = targetBufferMs;
+        function updateTargetBuffer(newValue) {{
+            targetBufferMs = Math.max(20, Math.min(1000, newValue));
+            targetBufferInput.value = targetBufferMs;
             localStorage.setItem('rustcast_target_buffer', targetBufferMs);
+        }}
+        
+        targetBufferInput.addEventListener('input', (e) => {{
+            updateTargetBuffer(parseInt(e.target.value) || 60);
+        }});
+        
+        bufferMinusBtn.addEventListener('click', () => {{
+            updateTargetBuffer(targetBufferMs - 10);
+        }});
+        
+        bufferPlusBtn.addEventListener('click', () => {{
+            updateTargetBuffer(targetBufferMs + 10);
         }});
         
         playBtn.addEventListener('click', togglePlay);
