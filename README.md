@@ -1,36 +1,48 @@
 # 🎵 RustCast
 
-**Windows System Audio Streaming Server**
+**Windows 시스템 오디오 스트리밍 서버**
 
-더블클릭 → 바로 시스템 오디오 송출 서버 ON! 🚀
+더블클릭 → 바로 시스템 오디오 스트리밍 시작! 🚀
 
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows-0078d4.svg)](https://www.microsoft.com/windows)
 
-## ✨ Features
+## ✨ 주요 기능
 
 - 🖱️ **원클릭 실행** - exe 더블클릭만으로 서버 시작
 - 🔊 **시스템 오디오 캡처** - PC에서 재생되는 모든 소리를 스트리밍
-- 🌐 **웹 기반 플레이어** - 브라우저에서 바로 재생
+- ⚡ **저지연 스트리밍** - WebSocket + Opus 코덱으로 ~50-100ms 지연
+- 🌐 **웹 기반 플레이어** - 브라우저에서 바로 재생 (설치 불필요)
 - 📱 **모바일 지원** - 스마트폰, 태블릿 등 어디서든 접속
-- 🔧 **시스템 트레이** - 백그라운드 실행 + 우클릭 메뉴
-- ⚙️ **설정 가능** - 포트, 비트레이트 등 커스터마이즈
+- 🔧 **시스템 트레이** - 백그라운드 실행 + 설정 패널
 
-## 🚀 Quick Start
+## 🏗️ 아키텍처
+
+```
+WASAPI (오디오 캡처) → Opus 인코더 ──┬── WebSocket (저지연) → 웹 플레이어
+                                    └── HTTP/Ogg (레거시) → HTML5 Audio
+```
+
+## 🚀 빠른 시작
 
 ### 사전 준비
 
 1. [Rust 설치](https://rustup.rs/) (1.70 이상)
+2. [CMake 설치](https://cmake.org/download/) (Opus 빌드에 필요)
+3. Visual Studio Build Tools (C++ 컴파일러)
 
 ### 빌드 & 실행
 
-```bash
+```powershell
 # 클론
-git clone https://github.com/your-username/rustcast.git
+git clone https://github.com/Kamilake/rustcast.git
 cd rustcast
 
-# 빌드 (릴리즈)
+# CMake 경로 설정 (필요시)
+$env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
+
+# 릴리즈 빌드
 cargo build --release
 
 # 실행
@@ -40,11 +52,11 @@ cargo build --release
 ### 사용 방법
 
 1. `rustcast.exe` 더블클릭
-2. 시스템 트레이에 아이콘 생성됨
-3. 브라우저가 자동으로 열림 (http://localhost:3000)
+2. 시스템 트레이에 아이콘 생성
+3. 브라우저가 자동으로 열림 (`http://localhost:3000`)
 4. 음악 재생! 🎶
 
-## 🔧 Configuration
+## 🔧 설정
 
 설정 파일 위치: `%APPDATA%\rustcast\RustCast\config.json`
 
@@ -58,44 +70,59 @@ cargo build --release
 
 | 설정 | 설명 | 기본값 |
 |------|------|--------|
-| `port` | HTTP 서버 포트 | 3000 |
-| `bitrate` | MP3 인코딩 비트레이트 (kbps) | 192 |
+| `port` | HTTP/WebSocket 서버 포트 | 3000 |
+| `bitrate` | Opus 인코딩 비트레이트 (kbps) | 192 |
 | `auto_start` | 실행 시 자동 스트리밍 시작 | true |
 
-## 📱 접속 방법
+## 🌐 HTTP 엔드포인트
 
-### 같은 네트워크 내 다른 기기에서 접속
+| 경로 | 설명 |
+|------|------|
+| `/` | 저지연 웹 플레이어 (WebSocket + Web Audio API) |
+| `/legacy` | 레거시 HTML5 Audio 플레이어 |
+| `/ws` | WebSocket 스트리밍 (Raw Opus 패킷) |
+| `/stream.opus` | Opus/Ogg 오디오 스트림 |
+| `/status` | 서버 상태 JSON |
+
+## 📱 다른 기기에서 접속
+
+### 같은 네트워크 내 접속
 
 1. PC의 IP 주소 확인 (예: `192.168.1.100`)
 2. 브라우저에서 `http://192.168.1.100:3000` 접속
-3. Windows 방화벽에서 포트 허용 필요할 수 있음
+3. Windows 방화벽에서 포트 허용 필요
 
-### 직접 스트림 URL
+### 지연 시간 비교
 
-- 웹 플레이어: `http://[IP]:3000/`
-- MP3 스트림: `http://[IP]:3000/stream.mp3`
+| 플레이어 | 지연 시간 | 비고 |
+|----------|-----------|------|
+| 저지연 (`/`) | ~50-100ms | WebSocket + Web Audio API |
+| 레거시 (`/legacy`) | ~2000-3000ms | HTML5 Audio 버퍼링 |
 
-## 🛠️ System Tray Menu
+## 📦 의존성
+
+| 크레이트 | 용도 |
+|----------|------|
+| `cpal` | WASAPI 오디오 캡처 |
+| `audiopus` | Opus 인코딩 |
+| `tiny_http` | 경량 HTTP 서버 |
+| `native-windows-gui` | Windows 네이티브 GUI |
+| `crossbeam-channel` | 고성능 채널 통신 |
+
+## 🛠️ 시스템 트레이 메뉴
 
 | 메뉴 | 기능 |
 |------|------|
-| 🌐 Open in Browser | 웹 플레이어 열기 |
-| ⏯️ Toggle Streaming | 스트리밍 시작/중지 |
-| ⚙️ Settings... | 설정 확인 |
-| ❌ Quit | 프로그램 종료 |
+| 🌐 브라우저에서 열기 | 웹 플레이어 열기 |
+| ⏯️ 스트리밍 토글 | 스트리밍 시작/중지 |
+| ⚙️ 설정 | 설정 패널 열기 |
+| ❌ 종료 | 프로그램 종료 |
 
-## 📦 Dependencies
+## 🤝 기여하기
 
-- [cpal](https://crates.io/crates/cpal) - 크로스 플랫폼 오디오 캡처
-- [tiny_http](https://crates.io/crates/tiny_http) - 경량 HTTP 서버
-- [mp3lame-encoder](https://crates.io/crates/mp3lame-encoder) - MP3 인코딩
-- [tray-item](https://crates.io/crates/tray-item) - 시스템 트레이
+기여 환영합니다! [CONTRIBUTING.md](CONTRIBUTING.md)를 참고해주세요.
 
-## 🤝 Contributing
-
-기여 환영합니다! Issue나 PR을 남겨주세요.
-
-## 📄 License
+## 📄 라이선스
 
 MIT License - 자유롭게 사용하세요!
 
