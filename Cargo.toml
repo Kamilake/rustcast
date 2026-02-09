@@ -38,7 +38,7 @@ env_logger = "0.11"
 # For Windows-specific features
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "shellapi"] }
-windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Foundation"] }
 native-windows-gui = "1.0"
 native-windows-derive = "1.0"
 

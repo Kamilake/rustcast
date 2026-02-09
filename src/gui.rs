@@ -1,5 +1,6 @@
 //! Native Windows GUI module for RustCast Settings Panel
 //! Provides a settings window with streaming controls, status indicator, and port configuration
+//! Now with modern Windows 11 styling and GridLayout
 
 #![cfg(windows)]
 
@@ -10,6 +11,31 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use crate::config::Config;
+
+// Windows 11 DWM attributes
+#[allow(dead_code)]
+mod dwm {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWM_WINDOW_CORNER_PREFERENCE};
+    
+    pub const DWMWCP_ROUND: DWM_WINDOW_CORNER_PREFERENCE = 2;
+    #[allow(dead_code)]
+    pub const DWMWCP_ROUNDSMALL: DWM_WINDOW_CORNER_PREFERENCE = 3;
+    
+    /// Apply Windows 11 modern styling to a window
+    pub fn apply_win11_style(hwnd: HWND) {
+        unsafe {
+            // Enable rounded corners (Windows 11)
+            let preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                &preference as *const _ as *const _,
+                std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
+        }
+    }
+}
 
 /// Actions from the GUI
 #[derive(Debug, Clone)]
@@ -73,18 +99,26 @@ impl SettingsPanel {
         // Initialize native-windows-gui
         nwg::init()?;
         
+        // Set global font to Segoe UI for modern Windows look
+        nwg::Font::set_global_family("Segoe UI")?;
+        
         // Try to load icon
         let icon = Self::load_icon()?;
         
         // Build window
         let mut window = nwg::Window::default();
         nwg::Window::builder()
-            .size((380, 380))
+            .size((400, 310))
             .position((300, 200))
             .title("RustCast 설정")
             .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::MINIMIZE_BOX)
             .icon(Some(&icon))
             .build(&mut window)?;
+        
+        // Apply Windows 11 styling (rounded corners, etc.)
+        if let Some(hwnd) = window.handle.hwnd() {
+            dwm::apply_win11_style(hwnd as isize);
+        }
         
         // Tray notification
         let mut tray = nwg::TrayNotification::default();
@@ -124,36 +158,36 @@ impl SettingsPanel {
             .text("종료")
             .build(&mut tray_item_quit)?;
         
-        // Status frame
+        // ===== Status Section (with absolute positioning) =====
         let mut status_frame = nwg::Frame::default();
         nwg::Frame::builder()
             .parent(&window)
             .position((15, 15))
-            .size((340, 100))
+            .size((360, 95))
             .build(&mut status_frame)?;
         
         let mut status_label = nwg::Label::default();
         nwg::Label::builder()
             .parent(&status_frame)
             .text("서버 상태:")
-            .position((15, 15))
-            .size((80, 25))
+            .position((12, 12))
+            .size((80, 22))
             .build(&mut status_label)?;
         
         let mut status_indicator = nwg::Label::default();
         nwg::Label::builder()
             .parent(&status_frame)
             .text("● 정지됨")
-            .position((100, 15))
-            .size((220, 25))
+            .position((95, 12))
+            .size((250, 22))
             .build(&mut status_indicator)?;
         
         let mut clients_label = nwg::Label::default();
         nwg::Label::builder()
             .parent(&status_frame)
             .text("연결된 클라이언트: 0")
-            .position((15, 45))
-            .size((200, 25))
+            .position((12, 36))
+            .size((200, 22))
             .build(&mut clients_label)?;
         
         // Stream toggle button
@@ -161,8 +195,8 @@ impl SettingsPanel {
         nwg::Button::builder()
             .parent(&status_frame)
             .text("▶ 스트리밍 시작")
-            .position((15, 70))
-            .size((150, 25))
+            .position((12, 62))
+            .size((165, 28))
             .build(&mut stream_button)?;
         
         // Open browser button
@@ -170,24 +204,24 @@ impl SettingsPanel {
         nwg::Button::builder()
             .parent(&status_frame)
             .text("🌐 브라우저에서 열기")
-            .position((175, 70))
-            .size((150, 25))
+            .position((185, 62))
+            .size((165, 28))
             .build(&mut open_browser_button)?;
         
-        // Settings frame
+        // ===== Settings Section (with absolute positioning) =====
         let mut settings_frame = nwg::Frame::default();
         nwg::Frame::builder()
             .parent(&window)
-            .position((15, 125))
-            .size((340, 150))
+            .position((15, 120))
+            .size((360, 100))
             .build(&mut settings_frame)?;
         
         let mut port_label = nwg::Label::default();
         nwg::Label::builder()
             .parent(&settings_frame)
             .text("포트:")
-            .position((15, 15))
-            .size((80, 25))
+            .position((12, 14))
+            .size((85, 22))
             .build(&mut port_label)?;
         
         let config = state.config.borrow();
@@ -196,23 +230,23 @@ impl SettingsPanel {
         nwg::TextInput::builder()
             .parent(&settings_frame)
             .text(&config.port.to_string())
-            .position((100, 12))
-            .size((100, 22))
+            .position((105, 10))
+            .size((80, 24))
             .build(&mut port_input)?;
         
         let mut bitrate_label = nwg::Label::default();
         nwg::Label::builder()
             .parent(&settings_frame)
             .text("비트레이트:")
-            .position((15, 50))
-            .size((80, 25))
+            .position((12, 44))
+            .size((90, 22))
             .build(&mut bitrate_label)?;
         
         let mut bitrate_combo = nwg::ComboBox::default();
         nwg::ComboBox::builder()
             .parent(&settings_frame)
-            .position((100, 47))
-            .size((100, 25))
+            .position((105, 40))
+            .size((100, 200))
             .collection(vec![
                 "64 kbps".to_string(),
                 "96 kbps".to_string(),
@@ -241,29 +275,22 @@ impl SettingsPanel {
         nwg::CheckBox::builder()
             .parent(&settings_frame)
             .text("시작 시 자동으로 스트리밍 시작")
-            .position((15, 85))
-            .size((250, 25))
+            .position((12, 72))
+            .size((280, 22))
             .check_state(if config.auto_start { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked })
             .build(&mut autostart_check)?;
         
-        drop(config);
+        // info_label removed - cleaner without it
         
-        // Info label
-        let mut info_label = nwg::Label::default();
-        nwg::Label::builder()
-            .parent(&settings_frame)
-            .text("※ 포트/비트레이트 변경은 재시작 후 적용됩니다")
-            .position((15, 115))
-            .size((300, 20))
-            .build(&mut info_label)?;
+        drop(config);
         
         // Save button
         let mut save_button = nwg::Button::default();
         nwg::Button::builder()
             .parent(&window)
             .text("💾 설정 저장")
-            .position((15, 285))
-            .size((340, 35))
+            .position((15, 230))
+            .size((360, 35))
             .build(&mut save_button)?;
         
         // Status update timer (500ms interval)
